@@ -1,0 +1,885 @@
+---
+title: "impute"
+author: '1'
+date: "2022/8/15"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r }
+library(survival)
+library(devtools)
+library(mombf)
+library(forecast)
+library(compareGroups)
+library(forcats)
+library(glmnet)
+library(ggplot2)
+library(dplyr)
+library(randomForestSRC)
+library(mice)
+data(flchain)
+data<-flchain
+n<-nrow(data)
+data.c <- data[,c(1,2,3,4,5,7,8,9,10)]
+m<-mice(data.c,seed=2022)
+data.mi<-complete(m,"long")#export the 5 imputed datasets
+survdataMI<-data.mi[,-c(1:2)]
+## Recoding sample year
+survdataMI$sample.yr[survdataMI$sample.yr == "1995"] <- "Early"
+survdataMI$sample.yr[survdataMI$sample.yr == "1996"] <- "Early"
+survdataMI$sample.yr[survdataMI$sample.yr == "1997"] <- "Early"
+survdataMI$sample.yr[survdataMI$sample.yr == "1998"] <- "Mid"
+survdataMI$sample.yr[survdataMI$sample.yr == "1999"] <- "Mid"
+survdataMI$sample.yr[survdataMI$sample.yr == "2000"] <- "Mid"
+survdataMI$sample.yr[survdataMI$sample.yr == "2001"] <- "Late"
+survdataMI$sample.yr[survdataMI$sample.yr == "2002"] <- "Late"
+survdataMI$sample.yr[survdataMI$sample.yr == "2003"] <- "Late"
+survdataMI$sample.yr <- factor(survdataMI$sample.yr)
+```
+
+#All plots output the average variable importance among the 5 imputed data sets.
+
+## Early samples
+
+```{r}
+# Bayesian variable selection
+# Initialising lists
+margpp.aftz = pp.aftz1= margpp.aftmom = pp.aftmom1 = list()
+# Iterate through the 5 imputed datasets
+for(k in 1:5){
+  # Extracting early samples
+  ind.early <- which(survdataMI$sample.yr[ ((k-1)*n+1):(k*n) ] =="Early")
+  survdatak <- survdataMI[ ((k-1)*n+1):(k*n), ][ind.early,]
+  # Survival times
+  # Assigning half-day survival to the zero-survivors
+  survdatak$futime <- ifelse(survdatak$futime==0,0.5,survdatak$futime)
+
+  # log Survival times and status
+  y <- Surv(log(survdatak$futime/365.25), event=survdatak$death)
+  # scaling kappa and creatinine
+  survdatak$kappa <- scale(survdatak$kappa)
+  survdatak$creatinine <- scale(survdatak$creatinine)  
+  survdatak$sex <- as.numeric(survdatak$sex)-1 # sex 0-1
+
+  # Design matrix
+  X= as.matrix(survdatak[,-c(3,8,9)]); 
+  
+  # Bayesian Variable Selection
+  # Priors
+  priorCoefz = zellnerprior(taustd=1) # g-prior
+  priorCoefm= momprior(taustd=1) # p-mom
+  priorGroup= groupzellnerprior(taustd=1)
+  # LINEAR EFFECTS 
+  f= formula(paste('y ~ ',paste('X[,',1:ncol(X),']',sep='',collapse="+"),sep=''))
+
+  mslinz <- modelSelection(f, priorCoef= priorCoefz, priorDelta= modelbbprior(1,1), priorGroup=priorGroup, 
+                           enumerate=TRUE)
+  mslinm <- modelSelection(f, priorCoef= priorCoefm, priorDelta= modelbbprior(1,1), priorGroup=priorGroup, 
+                           enumerate=TRUE)
+  
+  #MARGINAL POSTERIOR INCLUSION PROB FOR AFT-Zellner
+  margpp.aftz[[k]] = mslinz$margpp
+  pp.aftz1[[k]]= postProb(mslinz)
+  #MARGINAL POSTERIOR INCLUSION PROB FOR AFT-pMOMZ 
+  margpp.aftmom[[k]] = mslinm$margpp
+  pp.aftmom1[[k]] = postProb(mslinm)
+}
+
+# Posterior Summaries for BVS in imputed data sets
+#MARGINAL POSTERIOR INCLUSION PROB FOR AFT-Zellner
+new.names <- c("Intercept",colnames(X))
+for(k in 1:5) names(margpp.aftz[[k]]) <- new.names
+for(k in 1:5){
+  writeLines("##################################################################")
+  writeLines(paste("Imputed data set k = ", k))
+  writeLines("##################################################################")
+  # Posterior Inclusion Probabilities
+  print(margpp.aftz[[k]])
+  # Posterior Model Probabilities  
+  print(head(pp.aftz1[[k]]))
+}
+#MARGINAL POSTERIOR INCLUSION PROB FOR AFT-pMOMZ 
+new.names <- c("Intercept",colnames(X))
+for(k in 1:5) names(margpp.aftmom[[k]]) <- new.names
+for(k in 1:5){
+  writeLines("##################################################################")
+  writeLines(paste("Imputed data set k = ", k))
+  writeLines("##################################################################")
+  # Posterior Inclusion Probabilities
+  print(margpp.aftmom[[k]])
+  # Posterior Model Probabilities  
+  print(head(pp.aftmom1[[k]]))
+}
+
+# Average PIP over imputed data sets
+# Average PIP (zellner)
+pip <- matrix(0, ncol = 5, nrow = length(margpp.aftz[[1]]))
+for(k in 1:5) {
+  pip[,k] <- margpp.aftz[[k]]}
+  gr.pip <- apply(pip,1,mean)
+  names(gr.pip) <- new.names
+  # Plot
+  gr.pip <- gr.pip[-which(names(gr.pip) == "Intercept")]
+  data_plot <- order(gr.pip, decreasing = FALSE)
+  data_plot_names <- names(gr.pip)[order(gr.pip, decreasing = FALSE)]
+  
+  Bay_z_early_sensitivity<-data.frame(y = gr.pip[data_plot],
+             x = factor(data_plot_names,
+                        data_plot_names,
+                        ordered = T)) %>% 
+    ggplot(aes(x = x, y = y, label = format(y, digits = 1))) + 
+    geom_bar(col = "#000000", fill = "#a3a3a3", stat="identity") +
+    geom_text(nudge_y = 0.02) + 
+    xlab("") +
+    scale_y_continuous(name = "Posterior inclusion probability AFT-Zellner(impute,early)",
+                       expand = c(0, 0), limits = c(0, 1.07), breaks = c(0:10)/10) + 
+    coord_flip() +
+    theme_classic() + 
+    theme(axis.text = element_text(size = 10, color = "black"),
+          axis.title.x = element_text(size = 13, vjust = 0.1))
+pdf("Graph6.pdf")
+print(Bay_z_early_sensitivity)
+dev.off()
+
+
+# Average PIP (pmom)
+pip <- matrix(0, ncol = 5, nrow = length(margpp.aftmom[[1]]))
+for(k in 1:5) {
+  pip[,k] <- margpp.aftmom[[k]]}
+gr.pip <- apply(pip,1,mean)
+names(gr.pip) <- new.names
+# Plot
+gr.pip <- gr.pip[-which(names(gr.pip) == "Intercept")]
+data_plot <- order(gr.pip, decreasing = FALSE)
+data_plot_names <- names(gr.pip)[order(gr.pip, decreasing = FALSE)]
+
+Bay_mom_early_sensitivity<-data.frame(y = gr.pip[data_plot],
+           x = factor(data_plot_names,
+                      data_plot_names,
+                      ordered = T)) %>% 
+  ggplot(aes(x = x, y = y, label = format(y, digits = 1))) + 
+  geom_bar(col = "#000000", fill = "#a3a3a3", stat="identity") +
+  geom_text(nudge_y = 0.02) + 
+  xlab("") +
+  scale_y_continuous(name = "Posterior inclusion probability AFT-pMoM(impute,early)",
+                     expand = c(0, 0), limits = c(0, 1.07), breaks = c(0:10)/10) + 
+  coord_flip() +
+  theme_classic() + 
+  theme(axis.text = element_text(size = 10, color = "black"),
+        axis.title.x = element_text(size = 13, vjust = 0.1))
+pdf("Graph7.pdf")
+print(Bay_mom_early_sensitivity)
+dev.off()
+
+
+# Cox-LASSO
+set.seed(2022)
+b.coxlasso = b2.coxlasso= list()
+for(k in 1:5){
+  # Extracting early samples
+  ind.early <- which(survdataMI$sample.yr[ ((k-1)*n+1):(k*n) ] =="Early")
+  survdatak <- survdataMI[ ((k-1)*n+1):(k*n), ][ind.early,]
+  # Survival times
+  # Assigning half-day survival to the zero-survivors
+  survdatak$futime <- ifelse(survdatak$futime==0,0.5,survdatak$futime)
+  
+  # Survival times and status
+  y2 <- Surv(survdatak$futime/365.25, event=survdatak$death)
+  # scaling kappa and creatinine
+  survdatak$kappa <- scale(survdatak$kappa)
+  survdatak$creatinine <- scale(survdatak$creatinine)  
+  survdatak$sex <- as.numeric(survdatak$sex)-1 # sex 0-1
+
+  # Design matrix
+  X2 <- as.matrix(survdatak[,-c(3,8,9)]); 
+ 
+cv.fit= try(cv.glmnet(x =  X2, y = y2, family="cox", 
+                      maxit=10000, nfolds=10, alpha=1), silent=FALSE)
+fit= try(glmnet(x = X2, y=y2, family = "cox", maxit=10000, alpha=1), silent=TRUE)
+  
+# coefficients (lambda.min)
+b.coxlasso[[k]] = as.double(coef(fit, s=cv.fit$lambda.min))
+# coefficients (lambda.1se)
+b2.coxlasso[[k]] = as.double(coef(fit, s=cv.fit$lambda.1se))
+}
+
+# Average coefficient
+coef <- matrix(0, ncol = 5, nrow = length(b.coxlasso[[1]]))
+coef2 <- matrix(0, ncol = 5, nrow = length(b2.coxlasso[[1]]))
+for(k in 1:5) {
+  coef[,k] <- b.coxlasso[[k]]
+  coef2[,k] <- b2.coxlasso[[k]]
+  }
+  gr.coef <- apply(coef,1,mean)
+  gr.coef2 <- apply(coef2,1,mean)
+  
+# active variables (lambda.min)
+new.names[-1][which(gr.coef!=0)]
+# active variables (lambda.1se)
+new.names[-1][which(gr.coef2!=0)]
+
+# Compare the variable importance by the magnitude of its coefficients (more distant from zero, greater the importance).
+# Plot-lambda.min
+data_plot <- order(gr.coef, decreasing = FALSE)
+data_plot_names <- new.names[-1][order(gr.coef, decreasing = FALSE)]
+  
+lasso_min_early_sensitivity<- data.frame(y = gr.coef[data_plot],
+             x = factor(data_plot_names,
+                        data_plot_names,
+                        ordered = T)) %>% 
+    ggplot(aes(x = x, y = y, label = format(y, digits = 1))) + 
+    geom_bar(col = "#000000", fill = "#a3a3a3", stat="identity") +
+    geom_text(nudge_y = 0.02) + 
+    xlab("") +
+    scale_y_continuous(name = "Variable Importance CoxLasso-lambda.min(impute,early)",
+                       expand = c(0, 0), limits = c(0, 0.4), breaks = c(0:10)/10) + 
+    coord_flip() +
+    theme_classic() + 
+    theme(axis.text = element_text(size = 10, color = "black"),
+          axis.title.x = element_text(size = 13, vjust = 0.1))
+pdf("Graph10.pdf")
+print(lasso_min_early_sensitivity)
+dev.off()
+  
+# Plot-lambda.1se
+data_plot <- order(gr.coef2, decreasing = FALSE)
+data_plot_names <- new.names[-1][order(gr.coef2, decreasing = FALSE)]
+  
+lasso_1se_early_sensitivity<-data.frame(y = gr.coef2[data_plot],
+             x = factor(data_plot_names,
+                        data_plot_names,
+                        ordered = T)) %>% 
+    ggplot(aes(x = x, y = y, label = format(y, digits = 1))) + 
+    geom_bar(col = "#000000", fill = "#a3a3a3", stat="identity") +
+    geom_text(nudge_y = 0.02) + 
+    xlab("") +
+    scale_y_continuous(name = "Variable Importance CoxLasso-lambda.1se(impute,early)",
+                       expand = c(0, 0), limits = c(0, 0.3), breaks = c(0:10)/10) + 
+    coord_flip() +
+    theme_classic() + 
+    theme(axis.text = element_text(size = 10, color = "black"),
+          axis.title.x = element_text(size = 13, vjust = 0.1))
+pdf("Graph11.pdf")
+print(lasso_1se_early_sensitivity)
+dev.off()
+
+# Random survival forests
+  imp=list()
+  set.seed(2022)
+  for(k in 1:5){
+  # Extracting early samples
+  ind.early <- which(survdataMI$sample.yr[ ((k-1)*n+1):(k*n) ] =="Early")
+  survdatak <- survdataMI[ ((k-1)*n+1):(k*n), ][ind.early,]
+  # Survival times
+  # Assigning half-day survival to the zero-survivors
+  survdatak$futime <- ifelse(survdatak$futime==0,0.5,survdatak$futime)
+  
+  # Survival times and status
+  survdatak$futime <- survdatak$futime/365.25
+  # scaling kappa and creatinine
+  survdatak$kappa <- scale(survdatak$kappa)
+  survdatak$creatinine <- scale(survdatak$creatinine)  
+  survdatak$sex <- as.numeric(survdatak$sex)-1 # sex 0-1
+  
+  survdatak<-survdatak[,-3]
+
+  f.obj <- rfsrc(Surv(futime,death) ~ ., survdatak, importance=TRUE)
+  imp[[k]]<-f.obj$importance
+  }
+  
+  pip <- matrix(0, ncol = 5, nrow = length(imp[[1]]))
+  
+  # Average VIMP
+  for(k in 1:5) {
+  pip[,k] <- imp[[k]]}
+gr.pip <- apply(pip,1,mean)
+names(gr.pip) <- names(survdataMI[,-c(3,8,9)])
+
+  # Plot the average VIMP
+data_plot <- order(gr.pip, decreasing = FALSE)
+data_plot_names <- names(gr.pip)[order(gr.pip, decreasing = FALSE)]
+
+rsf_early_sensitivity<-data.frame(y = gr.pip[data_plot],
+           x = factor(data_plot_names,
+                      data_plot_names,
+                      ordered = T)) %>% 
+  ggplot(aes(x = x, y = y, label = format(y, digits = 1))) + 
+  geom_bar(col = "#000000", fill = "#a3a3a3", stat="identity") +
+  geom_text(nudge_y = 0.02) + 
+  xlab("") +
+  scale_y_continuous(name = "Variable Importance RSF(impute,early)",
+                     expand = c(0, 0), limits = c(-0.01, 0.5), breaks = c(0:10)/10) + 
+  coord_flip() +
+  theme_classic() + 
+  theme(axis.text = element_text(size = 10, color = "black"),
+        axis.title.x = element_text(size = 13, vjust = 0.1))
+pdf("Graph13.pdf")
+print(rsf_early_sensitivity)
+dev.off()
+  
+```
+
+## Mid samples
+
+```{r}
+#BVS impute
+# Initialising lists
+margpp.aftz = pp.aftz= margpp.aftmom = pp.aftmom = list()
+# Iterate through the 5 imputed datasets
+for(k in 1:5){
+  # Extracting early samples
+  ind.early <- which(survdataMI$sample.yr[ ((k-1)*n+1):(k*n) ] =="Mid")
+  survdatak <- survdataMI[ ((k-1)*n+1):(k*n), ][ind.early,]
+  # Survival times
+  # Assigning half-day survival to the zero-survivors
+  survdatak$futime <- ifelse(survdatak$futime==0,0.5,survdatak$futime)
+
+  # log Survival times and status
+  y <- Surv(log(survdatak$futime/365.25), event=survdatak$death)
+  # scaling kappa and creatinine
+  survdatak$kappa <- scale(survdatak$kappa)
+  survdatak$creatinine <- scale(survdatak$creatinine)  
+  survdatak$sex <- as.numeric(survdatak$sex)-1 # sex 0-1
+
+  # Design matrix
+  X= as.matrix(survdatak[,-c(3,8,9)]); 
+  
+  # Bayesian Variable Selection
+  # Priors
+  priorCoefz = zellnerprior(taustd=1) # g-prior
+  priorCoefm= momprior(taustd=1) # p-mom
+  priorGroup= groupzellnerprior(taustd=1)
+  # LINEAR EFFECTS 
+  f= formula(paste('y ~ ',paste('X[,',1:ncol(X),']',sep='',collapse="+"),sep=''))
+
+  mslinz <- modelSelection(f, priorCoef= priorCoefz, priorDelta= modelbbprior(1,1), priorGroup=priorGroup, 
+                           enumerate=TRUE)
+  mslinm <- modelSelection(f, priorCoef= priorCoefm, priorDelta= modelbbprior(1,1), priorGroup=priorGroup, 
+                           enumerate=TRUE)
+  
+  #MARGINAL POSTERIOR INCLUSION PROB FOR AFT-Zellner
+  margpp.aftz[[k]] = mslinz$margpp
+  pp.aftz[[k]]= postProb(mslinz)
+  #MARGINAL POSTERIOR INCLUSION PROB FOR AFT-pMOMZ 
+  margpp.aftmom[[k]] = mslinm$margpp
+  pp.aftmom[[k]] = postProb(mslinm)
+}
+
+# Posterior Summaries for BVS in imputed data sets
+#MARGINAL POSTERIOR INCLUSION PROB FOR AFT-Zellner
+new.names <- c("Intercept",colnames(X))
+for(k in 1:5) names(margpp.aftz[[k]]) <- new.names
+for(k in 1:5){
+  writeLines("##################################################################")
+  writeLines(paste("Imputed data set k = ", k))
+  writeLines("##################################################################")
+  # Posterior Inclusion Probabilities
+  print(margpp.aftz[[k]])
+  # Posterior Model Probabilities  
+  print(head(pp.aftz[[k]]))
+}
+#MARGINAL POSTERIOR INCLUSION PROB FOR AFT-pMOMZ 
+new.names <- c("Intercept",colnames(X))
+for(k in 1:5) names(margpp.aftmom[[k]]) <- new.names
+for(k in 1:5){
+  writeLines("##################################################################")
+  writeLines(paste("Imputed data set k = ", k))
+  writeLines("##################################################################")
+  # Posterior Inclusion Probabilities
+  print(margpp.aftmom[[k]])
+  # Posterior Model Probabilities  
+  print(head(pp.aftmom[[k]]))
+}
+
+# Average PIP over imputed data sets
+# Average PIP (zellner)
+pip <- matrix(0, ncol = 5, nrow = length(margpp.aftz[[1]]))
+for(k in 1:5) {
+  pip[,k] <- margpp.aftz[[k]]}
+  gr.pip <- apply(pip,1,mean)
+  names(gr.pip) <- new.names
+  # Plot
+  gr.pip <- gr.pip[-which(names(gr.pip) == "Intercept")]
+  data_plot <- order(gr.pip, decreasing = FALSE)
+  data_plot_names <- names(gr.pip)[order(gr.pip, decreasing = FALSE)]
+  
+bay_z_mid_sensitivity<-data.frame(y = gr.pip[data_plot],
+             x = factor(data_plot_names,
+                        data_plot_names,
+                        ordered = T)) %>% 
+    ggplot(aes(x = x, y = y, label = format(y, digits = 1))) + 
+    geom_bar(col = "#000000", fill = "#a3a3a3", stat="identity") +
+    geom_text(nudge_y = 0.02) + 
+    xlab("") +
+    scale_y_continuous(name = "Posterior inclusion probability AFT-Zellner(impute,mid)",
+                       expand = c(0, 0), limits = c(0, 1.07), breaks = c(0:10)/10) + 
+    coord_flip() +
+    theme_classic() + 
+    theme(axis.text = element_text(size = 10, color = "black"),
+          axis.title.x = element_text(size = 13, vjust = 0.1))
+pdf("Graph16.pdf")
+print(bay_z_mid_sensitivity)
+dev.off()
+
+
+# Average PIP (pmom)
+pip <- matrix(0, ncol = 5, nrow = length(margpp.aftmom[[1]]))
+for(k in 1:5) {
+  pip[,k] <- margpp.aftmom[[k]]}
+gr.pip <- apply(pip,1,mean)
+names(gr.pip) <- new.names
+# Plot
+gr.pip <- gr.pip[-which(names(gr.pip) == "Intercept")]
+data_plot <- order(gr.pip, decreasing = FALSE)
+data_plot_names <- names(gr.pip)[order(gr.pip, decreasing = FALSE)]
+
+bay_mom_mid_sensitivity<-data.frame(y = gr.pip[data_plot],
+           x = factor(data_plot_names,
+                      data_plot_names,
+                      ordered = T)) %>% 
+  ggplot(aes(x = x, y = y, label = format(y, digits = 1))) + 
+  geom_bar(col = "#000000", fill = "#a3a3a3", stat="identity") +
+  geom_text(nudge_y = 0.02) + 
+  xlab("") +
+  scale_y_continuous(name = "Posterior inclusion probability AFT-pMoM(impute,mid)",
+                     expand = c(0, 0), limits = c(0, 1.07), breaks = c(0:10)/10) + 
+  coord_flip() +
+  theme_classic() + 
+  theme(axis.text = element_text(size = 10, color = "black"),
+        axis.title.x = element_text(size = 13, vjust = 0.1))
+pdf("Graph17.pdf")
+print(bay_mom_mid_sensitivity)
+dev.off()
+
+
+# Cox-LASSO 
+b.coxlasso = b2.coxlasso= list()
+for(k in 1:5){
+  # Extracting early samples
+  ind.early <- which(survdataMI$sample.yr[ ((k-1)*n+1):(k*n) ] =="Mid")
+  survdatak <- survdataMI[ ((k-1)*n+1):(k*n), ][ind.early,]
+  # Survival times
+  # Assigning half-day survival to the zero-survivors
+  survdatak$futime <- ifelse(survdatak$futime==0,0.5,survdatak$futime)
+  
+  # Survival times and status
+  y2 <- Surv(survdatak$futime/365.25, event=survdatak$death)
+  # scaling kappa and creatinine
+  survdatak$kappa <- scale(survdatak$kappa)
+  survdatak$creatinine <- scale(survdatak$creatinine)  
+  survdatak$sex <- as.numeric(survdatak$sex)-1 # sex 0-1
+
+  # Design matrix
+  X2 <- as.matrix(survdatak[,-c(3,8,9)]); 
+  
+cv.fit= try(cv.glmnet(x =  X2, y = y2, family="cox", 
+                      maxit=10000, nfolds=10, alpha=1), silent=FALSE)
+fit= try(glmnet(x = X2, y=y2, family = "cox", maxit=10000, alpha=1), silent=TRUE)
+  
+# coefficients (lambda.min)
+b.coxlasso[[k]] = as.double(coef(fit, s=cv.fit$lambda.min))
+# coefficients (lambda.1se)
+b2.coxlasso[[k]] = as.double(coef(fit, s=cv.fit$lambda.1se))
+}
+
+# Average coefficient
+coef <- matrix(0, ncol = 5, nrow = length(b.coxlasso[[1]]))
+coef2 <- matrix(0, ncol = 5, nrow = length(b2.coxlasso[[1]]))
+for(k in 1:5) {
+  coef[,k] <- b.coxlasso[[k]]
+  coef2[,k] <- b2.coxlasso[[k]]
+  }
+  gr.coef <- apply(coef,1,mean)
+  gr.coef2 <- apply(coef2,1,mean)
+  
+# active variables (lambda.min)
+new.names[-1][which(gr.coef!=0)]
+# active variables (lambda.1se)
+new.names[-1][which(gr.coef2!=0)]
+
+# Compare the variable importance by the magnitude of its coefficients (more distant from zero, greater the importance).
+# Plot-lambda.min
+data_plot <- order(gr.coef, decreasing = FALSE)
+data_plot_names <- new.names[-1][order(gr.coef, decreasing = FALSE)]
+  
+lasso_min_mid_sensitivity<-data.frame(y = gr.coef[data_plot],
+             x = factor(data_plot_names,
+                        data_plot_names,
+                        ordered = T)) %>% 
+    ggplot(aes(x = x, y = y, label = format(y, digits = 1))) + 
+    geom_bar(col = "#000000", fill = "#a3a3a3", stat="identity") +
+    geom_text(nudge_y = 0.02) + 
+    xlab("") +
+    scale_y_continuous(name = "Variable Importance CoxLasso-lambda.min(impute,mid)",
+                       expand = c(0, 0), limits = c(0, 0.3), breaks = c(0:10)/10) + 
+    coord_flip() +
+    theme_classic() + 
+    theme(axis.text = element_text(size = 10, color = "black"),
+          axis.title.x = element_text(size = 13, vjust = 0.1))
+pdf("Graph20.pdf")
+print(lasso_min_mid_sensitivity)
+dev.off()
+
+  
+# Plot-lambda.1se
+data_plot <- order(gr.coef2, decreasing = FALSE)
+data_plot_names <- new.names[-1][order(gr.coef2, decreasing = FALSE)]
+  
+lasso_1se_mid_sensitivity<-data.frame(y = gr.coef2[data_plot],
+             x = factor(data_plot_names,
+                        data_plot_names,
+                        ordered = T)) %>% 
+    ggplot(aes(x = x, y = y, label = format(y, digits = 1))) + 
+    geom_bar(col = "#000000", fill = "#a3a3a3", stat="identity") +
+    geom_text(nudge_y = 0.02) + 
+    xlab("") +
+    scale_y_continuous(name = "Variable Importance CoxLasso-lambda.1se(impute,mid)",
+                       expand = c(0, 0), limits = c(0, 0.3), breaks = c(0:10)/10) + 
+    coord_flip() +
+    theme_classic() + 
+    theme(axis.text = element_text(size = 10, color = "black"),
+          axis.title.x = element_text(size = 13, vjust = 0.1))
+pdf("Graph21.pdf")
+print(lasso_1se_mid_sensitivity)
+dev.off()
+
+# Random survival forests
+  imp=list()
+  set.seed(2022)
+  for(k in 1:5){
+  # Extracting early samples
+  ind.early <- which(survdataMI$sample.yr[ ((k-1)*n+1):(k*n) ] =="Mid")
+  survdatak <- survdataMI[ ((k-1)*n+1):(k*n), ][ind.early,]
+  # Survival times
+  # Assigning half-day survival to the zero-survivors
+  survdatak$futime <- ifelse(survdatak$futime==0,0.5,survdatak$futime)
+  
+  # Survival times and status
+  survdatak$futime <- survdatak$futime/365.25
+  # scaling kappa and creatinine
+  survdatak$kappa <- scale(survdatak$kappa)
+  survdatak$creatinine <- scale(survdatak$creatinine) 
+  survdatak$sex <- as.numeric(survdatak$sex)-1 # sex 0-1
+  
+  survdatak<-survdatak[,-3]
+
+  f.obj <- rfsrc(Surv(futime,death) ~ ., survdatak, importance=TRUE)
+  imp[[k]]<-f.obj$importance
+  }
+  
+  pip <- matrix(0, ncol = 5, nrow = length(imp[[1]]))
+  
+  # Average VIMP
+  for(k in 1:5) {
+  pip[,k] <- imp[[k]]}
+gr.pip <- apply(pip,1,mean)
+names(gr.pip) <- names(survdataMI[,-c(3,8,9)])
+
+  # Plot the average VIMP
+data_plot <- order(gr.pip, decreasing = FALSE)
+data_plot_names <- names(gr.pip)[order(gr.pip, decreasing = FALSE)]
+
+rsf_mid_sensitivity<-data.frame(y = gr.pip[data_plot],
+           x = factor(data_plot_names,
+                      data_plot_names,
+                      ordered = T)) %>% 
+  ggplot(aes(x = x, y = y, label = format(y, digits = 1))) + 
+  geom_bar(col = "#000000", fill = "#a3a3a3", stat="identity") +
+  geom_text(nudge_y = 0.02) + 
+  xlab("") +
+  scale_y_continuous(name = "Variable Importance RSF(impute,mid)",
+                     expand = c(0, 0), limits = c(-0.01, 0.5), breaks = c(0:10)/10) + 
+  coord_flip() +
+  theme_classic() + 
+  theme(axis.text = element_text(size = 10, color = "black"),
+        axis.title.x = element_text(size = 13, vjust = 0.1))
+pdf("Graph23.pdf")
+print(rsf_mid_sensitivity)
+dev.off()
+  
+```
+
+## Late samples
+
+```{r}
+#BVS impute
+# Initialising lists
+margpp.aftz = pp.aftz= margpp.aftmom = pp.aftmom = list()
+# Iterate through the 5 imputed datasets
+for(k in 1:5){
+  # Extracting early samples
+  ind.early <- which(survdataMI$sample.yr[ ((k-1)*n+1):(k*n) ] =="Late")
+  survdatak <- survdataMI[ ((k-1)*n+1):(k*n), ][ind.early,]
+  # Survival times
+  # Assigning half-day survival to the zero-survivors
+  survdatak$futime <- ifelse(survdatak$futime==0,0.5,survdatak$futime)
+
+  # log Survival times and status
+  y <- Surv(log(survdatak$futime/365.25), event=survdatak$death)
+  # scaling kappa and creatinine
+  survdatak$kappa <- scale(survdatak$kappa)
+  survdatak$creatinine <- scale(survdatak$creatinine) 
+  survdatak$sex <- as.numeric(survdatak$sex)-1 # sex 0-1
+
+  # Design matrix
+  X= as.matrix(survdatak[,-c(3,7,8,9)]); 
+  
+  # Bayesian Variable Selection
+  # Priors
+  priorCoefz = zellnerprior(taustd=1) # g-prior
+  priorCoefm= momprior(taustd=1) # p-mom
+  priorGroup= groupzellnerprior(taustd=1)
+  # LINEAR EFFECTS 
+  f= formula(paste('y ~ ',paste('X[,',1:ncol(X),']',sep='',collapse="+"),sep=''))
+
+  mslinz <- modelSelection(f, priorCoef= priorCoefz, priorDelta= modelbbprior(1,1), priorGroup=priorGroup, 
+                           enumerate=TRUE)
+  mslinm <- modelSelection(f, priorCoef= priorCoefm, priorDelta= modelbbprior(1,1), priorGroup=priorGroup, 
+                           enumerate=TRUE)
+  
+  #MARGINAL POSTERIOR INCLUSION PROB FOR AFT-Zellner
+  margpp.aftz[[k]] = mslinz$margpp
+  pp.aftz[[k]]= postProb(mslinz)
+  #MARGINAL POSTERIOR INCLUSION PROB FOR AFT-pMOMZ 
+  margpp.aftmom[[k]] = mslinm$margpp
+  pp.aftmom[[k]] = postProb(mslinm)
+}
+
+# Posterior Summaries for BVS in imputed data sets
+#MARGINAL POSTERIOR INCLUSION PROB FOR AFT-Zellner
+new.names <- c("Intercept",colnames(X))
+for(k in 1:5) names(margpp.aftz[[k]]) <- new.names
+for(k in 1:5){
+  writeLines("##################################################################")
+  writeLines(paste("Imputed data set k = ", k))
+  writeLines("##################################################################")
+  # Posterior Inclusion Probabilities
+  print(margpp.aftz[[k]])
+  # Posterior Model Probabilities  
+  print(head(pp.aftz[[k]]))
+}
+#MARGINAL POSTERIOR INCLUSION PROB FOR AFT-pMOMZ 
+new.names <- c("Intercept",colnames(X))
+for(k in 1:5) names(margpp.aftmom[[k]]) <- new.names
+for(k in 1:5){
+  writeLines("##################################################################")
+  writeLines(paste("Imputed data set k = ", k))
+  writeLines("##################################################################")
+  # Posterior Inclusion Probabilities
+  print(margpp.aftmom[[k]])
+  # Posterior Model Probabilities  
+  print(head(pp.aftmom[[k]]))
+}
+
+# Average PIP over imputed data sets
+# Average PIP (zellner)
+pip <- matrix(0, ncol = 5, nrow = length(margpp.aftz[[1]]))
+for(k in 1:5) {
+  pip[,k] <- margpp.aftz[[k]]}
+  gr.pip <- apply(pip,1,mean)
+  names(gr.pip) <- new.names
+  # Plot
+  gr.pip <- gr.pip[-which(names(gr.pip) == "Intercept")]
+  data_plot <- order(gr.pip, decreasing = FALSE)
+  data_plot_names <- names(gr.pip)[order(gr.pip, decreasing = FALSE)]
+  
+bay_z_late_sensitivity<-data.frame(y = gr.pip[data_plot],
+             x = factor(data_plot_names,
+                        data_plot_names,
+                        ordered = T)) %>% 
+    ggplot(aes(x = x, y = y, label = format(y, digits = 1))) + 
+    geom_bar(col = "#000000", fill = "#a3a3a3", stat="identity") +
+    geom_text(nudge_y = 0.02) + 
+    xlab("") +
+    scale_y_continuous(name = "Posterior inclusion probability AFT-Zellner(impute,late)",
+                       expand = c(0, 0), limits = c(0, 1.07), breaks = c(0:10)/10) + 
+    coord_flip() +
+    theme_classic() + 
+    theme(axis.text = element_text(size = 10, color = "black"),
+          axis.title.x = element_text(size = 13, vjust = 0.1))
+pdf("Graph26.pdf")
+print(bay_z_late_sensitivity)
+dev.off()
+
+
+# Average PIP (pmom)
+pip <- matrix(0, ncol = 5, nrow = length(margpp.aftmom[[1]]))
+for(k in 1:5) {
+  pip[,k] <- margpp.aftmom[[k]]}
+gr.pip <- apply(pip,1,mean)
+names(gr.pip) <- new.names
+# Plot
+gr.pip <- gr.pip[-which(names(gr.pip) == "Intercept")]
+data_plot <- order(gr.pip, decreasing = FALSE)
+data_plot_names <- names(gr.pip)[order(gr.pip, decreasing = FALSE)]
+
+bay_mom_late_sensitivity<-data.frame(y = gr.pip[data_plot],
+           x = factor(data_plot_names,
+                      data_plot_names,
+                      ordered = T)) %>% 
+  ggplot(aes(x = x, y = y, label = format(y, digits = 1))) + 
+  geom_bar(col = "#000000", fill = "#a3a3a3", stat="identity") +
+  geom_text(nudge_y = 0.02) + 
+  xlab("") +
+  scale_y_continuous(name = "Posterior inclusion probability AFT-pMoM(impute,late)",
+                     expand = c(0, 0), limits = c(0, 1.07), breaks = c(0:10)/10) + 
+  coord_flip() +
+  theme_classic() + 
+  theme(axis.text = element_text(size = 10, color = "black"),
+        axis.title.x = element_text(size = 13, vjust = 0.1))
+pdf("Graph27.pdf")
+print(bay_mom_late_sensitivity)
+dev.off()
+
+
+# Cox-LASSO
+b.coxlasso = b2.coxlasso= list()
+for(k in 1:5){
+  # Extracting early samples
+  ind.early <- which(survdataMI$sample.yr[ ((k-1)*n+1):(k*n) ] =="Late")
+  survdatak <- survdataMI[ ((k-1)*n+1):(k*n), ][ind.early,]
+  # Survival times
+  # Assigning half-day survival to the zero-survivors
+  survdatak$futime <- ifelse(survdatak$futime==0,0.5,survdatak$futime)
+  
+  # Survival times and status
+  y2 <- Surv(survdatak$futime/365.25, event=survdatak$death)
+  # scaling kappa and creatinine
+  survdatak$kappa <- scale(survdatak$kappa)
+  survdatak$creatinine <- scale(survdatak$creatinine)  
+  survdatak$sex <- as.numeric(survdatak$sex)-1 # sex 0-1
+
+  # Design matrix
+X2 <- as.matrix(survdatak[,-c(3,7,8,9)])
+  
+cv.fit= try(cv.glmnet(x =  X2, y = y2, family="cox", 
+                      maxit=10000, nfolds=10, alpha=1), silent=FALSE)
+fit= try(glmnet(x = X2, y=y2, family = "cox", maxit=10000, alpha=1), silent=TRUE)
+  
+# coefficients (lambda.min)
+b.coxlasso[[k]] = as.double(coef(fit, s=cv.fit$lambda.min))
+# coefficients (lambda.1se)
+b2.coxlasso[[k]] = as.double(coef(fit, s=cv.fit$lambda.1se))
+}
+
+# Average coefficient
+coef <- matrix(0, ncol = 5, nrow = length(b.coxlasso[[1]]))
+coef2 <- matrix(0, ncol = 5, nrow = length(b2.coxlasso[[1]]))
+for(k in 1:5) {
+  coef[,k] <- b.coxlasso[[k]]
+  coef2[,k] <- b2.coxlasso[[k]]
+  }
+  gr.coef <- apply(coef,1,mean)
+  gr.coef2 <- apply(coef2,1,mean)
+  
+# active variables (lambda.min)
+new.names[-1][which(gr.coef!=0)]
+# active variables (lambda.1se)
+new.names[-1][which(gr.coef2!=0)]
+
+# Compare the variable importance by the magnitude of its coefficients (more distant from zero, greater the importance).
+# Plot-lambda.min
+data_plot <- order(gr.coef, decreasing = FALSE)
+data_plot_names <- new.names[-1][order(gr.coef, decreasing = FALSE)]
+  
+lasso_min_late_sensitivity<-data.frame(y = gr.coef[data_plot],
+             x = factor(data_plot_names,
+                        data_plot_names,
+                        ordered = T)) %>% 
+    ggplot(aes(x = x, y = y, label = format(y, digits = 1))) + 
+    geom_bar(col = "#000000", fill = "#a3a3a3", stat="identity") +
+    geom_text(nudge_y = 0.02) + 
+    xlab("") +
+    scale_y_continuous(name = "Variable Importance CoxLasso-lambda.min(impute,late)",
+                       expand = c(0, 0), limits = c(0, 0.3), breaks = c(0:10)/10) + 
+    coord_flip() +
+    theme_classic() + 
+    theme(axis.text = element_text(size = 10, color = "black"),
+          axis.title.x = element_text(size = 13, vjust = 0.1))
+pdf("Graph30.pdf")
+print(lasso_min_late_sensitivity)
+dev.off()
+  
+  
+# Plot-lambda.1se
+data_plot <- order(gr.coef2, decreasing = FALSE)
+data_plot_names <- new.names[-1][order(gr.coef2, decreasing = FALSE)]
+  
+lasso_1se_late_sensitivity<-data.frame(y = gr.coef2[data_plot],
+             x = factor(data_plot_names,
+                        data_plot_names,
+                        ordered = T)) %>% 
+    ggplot(aes(x = x, y = y, label = format(y, digits = 1))) + 
+    geom_bar(col = "#000000", fill = "#a3a3a3", stat="identity") +
+    geom_text(nudge_y = 0.02) + 
+    xlab("") +
+    scale_y_continuous(name = "Variable Importance CoxLasso-lambda.1se(impute,late)",
+                       expand = c(0, 0), limits = c(0, 0.3), breaks = c(0:10)/10) + 
+    coord_flip() +
+    theme_classic() + 
+    theme(axis.text = element_text(size = 10, color = "black"),
+          axis.title.x = element_text(size = 13, vjust = 0.1))
+pdf("Graph31.pdf")
+print(lasso_1se_late_sensitivity)
+dev.off()
+
+# Random survival forests
+  imp=list()
+  set.seed(2022)
+  for(k in 1:5){
+  # Extracting early samples
+  ind.early <- which(survdataMI$sample.yr[ ((k-1)*n+1):(k*n) ] =="Late")
+  survdatak <- survdataMI[ ((k-1)*n+1):(k*n), ][ind.early,]
+  # Survival times
+  # Assigning half-day survival to the zero-survivors
+  survdatak$futime <- ifelse(survdatak$futime==0,0.5,survdatak$futime)
+  
+  # Survival times and status
+  survdatak$futime <- survdatak$futime/365.25
+  # scaling kappa and creatinine
+  survdatak$kappa <- scale(survdatak$kappa)
+  survdatak$creatinine <- scale(survdatak$creatinine) 
+  survdatak$sex <- as.numeric(survdatak$sex)-1 # sex 0-1
+  
+  survdatak<-survdatak[,-3]
+
+  f.obj <- rfsrc(Surv(futime,death) ~ ., survdatak, importance=TRUE)
+  imp[[k]]<-f.obj$importance
+  }
+  
+  pip <- matrix(0, ncol = 5, nrow = length(imp[[1]]))
+  
+  # Average VIMP
+  for(k in 1:5) {
+  pip[,k] <- imp[[k]]}
+gr.pip <- apply(pip,1,mean)
+names(gr.pip) <- names(survdataMI[,-c(3,8,9)])
+
+  # Plot the average VIMP
+data_plot <- order(gr.pip, decreasing = FALSE)
+data_plot_names <- names(gr.pip)[order(gr.pip, decreasing = FALSE)]
+
+rsf_late_sensitivity<-data.frame(y = gr.pip[data_plot],
+           x = factor(data_plot_names,
+                      data_plot_names,
+                      ordered = T)) %>% 
+  ggplot(aes(x = x, y = y, label = format(y, digits = 1))) + 
+  geom_bar(col = "#000000", fill = "#a3a3a3", stat="identity") +
+  geom_text(nudge_y = 0.02) + 
+  xlab("") +
+  scale_y_continuous(name = "Variable Importance RSF(impute,late)",
+                     expand = c(0, 0), limits = c(-0.01, 0.5), breaks = c(0:10)/10) + 
+  coord_flip() +
+  theme_classic() + 
+  theme(axis.text = element_text(size = 10, color = "black"),
+        axis.title.x = element_text(size = 13, vjust = 0.1))
+pdf("Graph33.pdf")
+print(rsf_late_sensitivity)
+dev.off()
+  
+```
