@@ -297,7 +297,7 @@ data.c$futime <- ifelse(data.c$futime==0,0.5,data.c$futime)
 
 # Histogram of survival time
 pdf("Graph2.pdf")
-hist(data.c$futime, breaks = 50, xlab = "Survival time (day)", probability = TRUE, main = "Early sample")
+hist(data.c$futime, breaks = 50, xlab = "Survival time (day)", probability = TRUE, main = "Mid sample")
 box()
 dev.off()
 
@@ -514,7 +514,7 @@ data.c$futime <- ifelse(data.c$futime==0,0.5,data.c$futime)
 
 # Histogram of survival time
 pdf("Graph3.pdf")
-hist(data.c$futime, breaks = 50, xlab = "Survival time (day)", probability = TRUE, main = "Early sample")
+hist(data.c$futime, breaks = 50, xlab = "Survival time (day)", probability = TRUE, main = "Late sample")
 box()
 dev.off()
 
